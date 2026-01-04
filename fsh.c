@@ -1,5 +1,5 @@
 /*
- * Fsh - The Friendly Shell v3.3.3
+ * Fsh - The Friendly Shell v3.3.4
  * Features: 500+ CMD Translations | Persian UTF-8 | Pipe | &&/& | Enhanced Safety
  */
 
@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <stdbool.h>
 
 #define FSH_MAX_INPUT 4096
 #define FSH_MAX_ARGS 128
@@ -86,6 +87,37 @@ typedef struct {
     int background;
 } CommandChain;
 
+typedef struct {
+    bool allexport;        // -a
+    bool notify;           // -b
+    bool errexit;          // -e
+    bool noglob;           // -f
+    bool hashall;          // -h
+    bool keyword;          // -k
+    bool monitor;          // -m
+    bool noexec;           // -n
+    bool privileged;       // -p
+    bool onecmd;           // -t
+    bool nounset;          // -u
+    bool verbose;          // -v
+    bool xtrace;           // -x
+    bool braceexpand;      // -B
+    bool noclobber;        // -C
+    bool errtrace;         // -E
+    bool histexpand;       // -H
+    bool physical;         // -P
+    bool functrace;        // -T
+    bool interactive;      // Set automatically
+    bool restricted;       // --restricted
+    bool posix;            // --posix
+    bool noediting;        // --noediting
+    bool norc;             // --norc
+    bool noprofile;        // --noprofile
+    bool login_shell;      // --login
+} ShellOptions;
+
+static ShellOptions shell_opts = {0};
+
 // CRITICAL: FORWARD DECLARATIONS - ALL functions must be declared before use
 static void sigchld_handler(int sig);
 static const BuiltinCommand* find_builtin(const char* cmd);
@@ -116,6 +148,8 @@ static void execute_single_command(char* cmd_line);
 static void execute_piped_commands(char* cmd_line);
 static int execute_command_line(char* input);
 static void print_banner(void);
+static void execute_command_line_from_file(const char* filename);
+static void cleanup_and_exit(void);
 
 // Built-in implementations
 int builtin_cd(char** args);
@@ -2003,21 +2037,125 @@ static int execute_command_line(char* input) {
     
     return last_exit_status;
 }
+static void execute_command_line_from_file(const char* filename) {
+    FILE* fp = fopen(filename, "r");
+    if (!fp) {
+        fprintf(stderr, COLOR_RED "Cannot open init file: %s - %s\n" COLOR_RESET, filename, strerror(errno));
+        return;
+    }
+    
+    char line[FSH_MAX_INPUT];
+    int line_num = 0;
+    
+    while (fgets(line, sizeof(line), fp)) {
+        line_num++;
+        // Remove newline
+        line[strcspn(line, "\n")] = 0;
+        
+        // Skip empty lines and comments
+        char* trimmed = line;
+        while (*trimmed == ' ' || *trimmed == '\t') trimmed++;
+        
+        if (*trimmed == '\0' || *trimmed == '#') continue;
+        
+        if (shell_opts.verbose) {
+            printf("+ %s\n", trimmed);
+        }
+        
+        execute_command_line(trimmed);
+        
+        // Exit on error if errexit is set
+        if (shell_opts.errexit && last_exit_status != 0) {
+            fprintf(stderr, COLOR_RED "Init file error at line %d: command failed with status %d\n" COLOR_RESET, 
+                    line_num, last_exit_status);
+            break;
+        }
+    }
+    
+    fclose(fp);
+}
+
+static void cleanup_and_exit(void) {
+    save_history();
+    
+    // Cleanup history
+    for (int i = 0; i < history.count; i++) {
+        free(history.commands[i]);
+    }
+    free(history.commands);
+    
+    // Cleanup command database
+    cleanup_system_commands();
+    
+    // Exit with last command status
+    exit(last_exit_status);
+}
 
 static void print_help(const char* program_name) {
-    printf("Usage: %s [options]\n", program_name);
-    printf("Options:\n");
+    printf("Fsh - The Friendly Shell v3.3.4\n\n");
+    printf("Usage: %s [options] [file]\n", program_name);
+    printf("\nOptions:\n");
     printf("  -c COMMAND    Execute COMMAND and exit\n");
     printf("  --help        Show this help message\n");
     printf("  --version     Show version information\n");
+    printf("  --login       Run as login shell\n");
+    printf("  --noprofile   Don't load profile on login\n");
+    printf("  --norc        Don't load rc file\n");
+    printf("  --restricted  Run in restricted mode\n");
+    printf("  --posix       POSIX mode (limited implementation)\n");
+    printf("  --noediting   Disable command line editing\n");
+    printf("\nShell Flags (like bash set builtin):\n");
+    printf("  -a  Mark modified variables for export\n");
+    printf("  -b  Notify of job termination immediately\n");
+    printf("  -e  Exit immediately on non-zero status\n");
+    printf("  -f  Disable filename generation (globbing)\n");
+    printf("  -h  Remember command locations\n");
+    printf("  -k  All assignment args go to environment\n");
+    printf("  -m  Enable job control\n");
+    printf("  -n  Read commands but don't execute\n");
+    printf("  -u  Treat unset variables as error\n");
+    printf("  -v  Print shell input lines as read\n");
+    printf("  -x  Print commands and args as executed\n");
+    printf("  -C  Disallow overwriting files via redirection\n");
+    printf("  -H  Enable ! style history substitution\n");
     printf("\nExamples:\n");
-    printf("  %s                    # Start interactive shell\n", program_name);
-    printf("  %s -c \"ls -la\"        # Execute command and exit\n", program_name);
-    printf("  %s --help             # Show help\n", program_name);
+    printf("  %s                    # Interactive shell\n", program_name);
+    printf("  %s -c \"ls | grep sh\"  # Execute command\n", program_name);
+    printf("  %s script.sh          # Run script file\n", program_name);
+}
+
+static int parse_o_option(const char* optname) {
+    if (strcmp(optname, "allexport") == 0) shell_opts.allexport = true;
+    else if (strcmp(optname, "errexit") == 0) shell_opts.errexit = true;
+    else if (strcmp(optname, "noglob") == 0) shell_opts.noglob = true;
+    else if (strcmp(optname, "verbose") == 0) shell_opts.verbose = true;
+    else if (strcmp(optname, "xtrace") == 0) shell_opts.xtrace = true;
+    else if (strcmp(optname, "nounset") == 0) shell_opts.nounset = true;
+    else if (strcmp(optname, "noexec") == 0) shell_opts.noexec = true;
+    else if (strcmp(optname, "history") == 0) {/* placeholder */}
+    else if (strcmp(optname, "posix") == 0) shell_opts.posix = true;
+    else if (strcmp(optname, "restricted") == 0) shell_opts.restricted = true;
+    else {
+        fprintf(stderr, COLOR_RED "Unknown option: -o %s\n" COLOR_RESET, optname);
+        return 1;
+    }
+    return 0;
+}
+
+static void init_restricted_mode(void) {
+    if (shell_opts.restricted) {
+        printf("%s[Restricted mode enabled]%s\n", COLOR_YELLOW, COLOR_RESET);
+        // In restricted mode, would disable:
+        // - cd command
+        // - Setting PATH
+        // - Redirects with >
+        // - exec command
+        // These require more architectural changes to implement fully
+    }
 }
 
 static void print_version(void) {
-    printf("Fsh - The Friendly Shell v3.3.3\n");
+    printf("Fsh - The Friendly Shell v3.3.4\n");
     printf("Copyright (C) 2026 FarazOS Project\n");
 }
 
@@ -2025,7 +2163,7 @@ static void print_version(void) {
 static void print_banner(void) {
     printf("\n╔══════════════════════════════════════════════════════════════════════════════╗\n");
     printf("║                                                                              ║\n");
-    printf("║   %sFsh - The Friendly Shell v3.3.3%s                                      ║\n", COLOR_MAGENTA, COLOR_RESET);
+    printf("║   %sFsh - The Friendly Shell v3.3.4%s                                      ║\n", COLOR_MAGENTA, COLOR_RESET);
     printf("║   %s500+ CMD | Persian UTF-8 | Pipe | &&/& | Enhanced Safety%s           ║\n", COLOR_CYAN, COLOR_RESET);
     printf("║                                                                              ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════════╝\n\n");
@@ -2299,49 +2437,124 @@ static const BuiltinCommand* find_builtin(const char* cmd) {
 // Main
 int main(int argc, char *argv[]) {
     
-    
+
     stats.start_time = time(NULL);
     init_history();
     init_command_database();
     signal(SIGCHLD, sigchld_handler);
     signal(SIGINT, SIG_IGN);
     detect_distro_name();
-    int opt;
-    int execute_mode = 0;  // 0 = interactive, 1 = -c command, 2 = script file
-    char *command_string = NULL;
+    shell_opts.interactive = isatty(STDIN_FILENO);
     
-    // Support both -c and long options
+    int opt;
+    int execute_mode = 0;
+    char *command_string = NULL;
+    char *init_file = NULL;
+    char *rc_file = NULL;
+    // Support long options
+
     static struct option long_options[] = {
+        {"debug", no_argument, 0, 1000},
+        {"debugger", no_argument, 0, 1001},
+        {"dump-po-strings", no_argument, 0, 1002},
+        {"dump-strings", no_argument, 0, 1003},
         {"help", no_argument, 0, 'h'},
-        {"version", no_argument, 0, 'v'},
+        {"init-file", required_argument, 0, 1004},
+        {"login", no_argument, 0, 'l'},
+        {"noediting", no_argument, 0, 1005},
+        {"noprofile", no_argument, 0, 1006},
+        {"norc", no_argument, 0, 1007},
+        {"posix", no_argument, 0, 1008},
+        {"pretty-print", no_argument, 0, 1009},
+        {"rcfile", required_argument, 0, 1010},
+        {"restricted", no_argument, 0, 1011},
+        {"verbose", no_argument, 0, 'v'},
+        {"version", no_argument, 0, 1012},
         {0, 0, 0, 0}
     };
-    
-    while ((opt = getopt_long(argc, argv, "c:hv", long_options, NULL)) != -1) {
+
+
+    while ((opt = getopt_long(argc, argv, "+abefhkmnop:tuUvxC:E:HPT", long_options, NULL)) != -1) {
         switch (opt) {
-            case 'c':
-                execute_mode = 1;
-                command_string = optarg;
-                break;
-            case 'h':
-                print_help(argv[0]);
-                return EXIT_SUCCESS;
-            case 'v':
-                print_version();
-                return EXIT_SUCCESS;
+            // Short options
+            case 'a': shell_opts.allexport = true; break;
+            case 'b': shell_opts.notify = true; break;
+            case 'c': execute_mode = 1; command_string = optarg; break;
+            case 'e': shell_opts.errexit = true; break;
+            case 'f': shell_opts.noglob = true; break;
+            case 'h': print_help(argv[0]); return EXIT_SUCCESS;
+            case 'k': shell_opts.keyword = true; break;
+            case 'm': shell_opts.monitor = true; break;
+            case 'n': shell_opts.noexec = true; break;
+            case 'p': shell_opts.privileged = true; break;
+            case 't': shell_opts.onecmd = true; break;
+            case 'u': shell_opts.nounset = true; break;
+            case 'v': shell_opts.verbose = true; break;
+            case 'x': shell_opts.xtrace = true; break;
+            case 'C': shell_opts.noclobber = true; break;
+            case 'E': shell_opts.errtrace = true; break;
+            case 'H': shell_opts.histexpand = true; break;
+            case 'P': shell_opts.physical = true; break;
+            case 'T': shell_opts.functrace = true; break;
+            
+            // Long options
+            case 1000: printf("Debug mode: not implemented\n"); break;
+            case 1001: printf("Debugger mode: not implemented\n"); break;
+            case 1002: printf("Dump po strings: not implemented\n"); break;
+            case 1003: printf("Dump strings: not implemented\n"); break;
+            case 1004: init_file = optarg; break;
+            case 'l': shell_opts.login_shell = true; break;
+            case 1005: shell_opts.noediting = true; break;
+            case 1006: shell_opts.noprofile = true; break;
+            case 1007: shell_opts.norc = true; break;
+            case 1008: shell_opts.posix = true; shell_opts.noprofile = true; shell_opts.norc = true; break;
+            case 1009: printf("Pretty print: not implemented\n"); break;
+            case 1010: rc_file = optarg; (void)rc_file; break;
+            case 1011: shell_opts.restricted = true; break;
+            case 1012: print_version(); return EXIT_SUCCESS;
+            
             default:
                 fprintf(stderr, COLOR_RED "Unknown option. Use --help for usage.\n" COLOR_RESET);
                 return EXIT_FAILURE;
         }
     }
+    init_restricted_mode();
+
+    if (init_file && !shell_opts.noprofile) {
+        if (access(init_file, R_OK) == 0) {
+            execute_command_line_from_file(init_file); // Would need implementation
+        }
+    }
+
+
     if (execute_mode == 1 && command_string) {
         init_command_database();
-        
-        // Execute command and exit immediately
+        if (shell_opts.verbose) printf("+ %s\n", command_string);
         execute_command_line(command_string);
-        
-        // Cleanup and exit with command's status
+        if (shell_opts.onecmd) cleanup_and_exit();
         cleanup_system_commands();
+        return last_exit_status;
+    }
+    
+    // Script file mode
+    if (optind < argc) {
+        FILE* script_file = fopen(argv[optind], "r");
+        if (!script_file) {
+            fprintf(stderr, COLOR_RED "Cannot open script: %s\n" COLOR_RESET, argv[optind]);
+            return EXIT_FAILURE;
+        }
+        fclose(script_file);
+        // execute_script_file(argv[optind]); // Would need implementation
+        return last_exit_status;
+    }
+    
+    // Interactive mode
+    if (!shell_opts.interactive) {
+        // Non-interactive: read from stdin
+        char input[FSH_MAX_INPUT];
+        while (fgets(input, sizeof(input), stdin)) {
+            execute_command_line(input);
+        }
         return last_exit_status;
     }
     scan_directory("/bin", &bin_cmds);
@@ -2384,6 +2597,9 @@ int main(int argc, char *argv[]) {
         while (*trimmed == ' ' || *trimmed == '\t') trimmed++;
         if (strcmp(trimmed, "exit") == 0 || strcmp(trimmed, "quit") == 0) {
             break;
+        }
+        if (shell_opts.xtrace) {
+            printf("+ %s\n", trimmed);
         }
         
         execute_command_line(trimmed);
