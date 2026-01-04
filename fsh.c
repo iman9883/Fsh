@@ -1,5 +1,5 @@
 /*
- * Fsh - The Friendly Shell v3.3.2
+ * Fsh - The Friendly Shell v3.3.3
  * Features: 500+ CMD Translations | Persian UTF-8 | Pipe | &&/& | Enhanced Safety
  */
 
@@ -25,6 +25,7 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <getopt.h>
 
 #define FSH_MAX_INPUT 4096
 #define FSH_MAX_ARGS 128
@@ -2003,11 +2004,28 @@ static int execute_command_line(char* input) {
     return last_exit_status;
 }
 
+static void print_help(const char* program_name) {
+    printf("Usage: %s [options]\n", program_name);
+    printf("Options:\n");
+    printf("  -c COMMAND    Execute COMMAND and exit\n");
+    printf("  --help        Show this help message\n");
+    printf("  --version     Show version information\n");
+    printf("\nExamples:\n");
+    printf("  %s                    # Start interactive shell\n", program_name);
+    printf("  %s -c \"ls -la\"        # Execute command and exit\n", program_name);
+    printf("  %s --help             # Show help\n", program_name);
+}
+
+static void print_version(void) {
+    printf("Fsh - The Friendly Shell v3.3.3\n");
+    printf("Copyright (C) 2026 FarazOS Project\n");
+}
+
 // Banner
 static void print_banner(void) {
     printf("\n╔══════════════════════════════════════════════════════════════════════════════╗\n");
     printf("║                                                                              ║\n");
-    printf("║   %sFsh - The Friendly Shell v3.3.2%s                                      ║\n", COLOR_MAGENTA, COLOR_RESET);
+    printf("║   %sFsh - The Friendly Shell v3.3.3%s                                      ║\n", COLOR_MAGENTA, COLOR_RESET);
     printf("║   %s500+ CMD | Persian UTF-8 | Pipe | &&/& | Enhanced Safety%s           ║\n", COLOR_CYAN, COLOR_RESET);
     printf("║                                                                              ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════════╝\n\n");
@@ -2279,8 +2297,8 @@ static const BuiltinCommand* find_builtin(const char* cmd) {
 }
 
 // Main
-int main(void) {
-    char input[FSH_MAX_INPUT];
+int main(int argc, char *argv[]) {
+    
     
     stats.start_time = time(NULL);
     init_history();
@@ -2288,12 +2306,52 @@ int main(void) {
     signal(SIGCHLD, sigchld_handler);
     signal(SIGINT, SIG_IGN);
     detect_distro_name();
+    int opt;
+    int execute_mode = 0;  // 0 = interactive, 1 = -c command, 2 = script file
+    char *command_string = NULL;
     
+    // Support both -c and long options
+    static struct option long_options[] = {
+        {"help", no_argument, 0, 'h'},
+        {"version", no_argument, 0, 'v'},
+        {0, 0, 0, 0}
+    };
+    
+    while ((opt = getopt_long(argc, argv, "c:hv", long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'c':
+                execute_mode = 1;
+                command_string = optarg;
+                break;
+            case 'h':
+                print_help(argv[0]);
+                return EXIT_SUCCESS;
+            case 'v':
+                print_version();
+                return EXIT_SUCCESS;
+            default:
+                fprintf(stderr, COLOR_RED "Unknown option. Use --help for usage.\n" COLOR_RESET);
+                return EXIT_FAILURE;
+        }
+    }
+    if (execute_mode == 1 && command_string) {
+        init_command_database();
+        
+        // Execute command and exit immediately
+        execute_command_line(command_string);
+        
+        // Cleanup and exit with command's status
+        cleanup_system_commands();
+        return last_exit_status;
+    }
     scan_directory("/bin", &bin_cmds);
     scan_directory("/sbin", &sbin_cmds);
-    
+    scan_directory("/usr/bin", &bin_cmds);
+    scan_directory("/usr/sbin", &sbin_cmds);
+    scan_directory("/usr/local/bin", &bin_cmds);
+    scan_directory("/usr/local/sbin", &sbin_cmds);
     print_banner();
-    
+    char input[FSH_MAX_INPUT];
     while (1) {
         char cwd[PATH_MAX];
         const char* user = getenv("USER") ?: "user";
@@ -2329,7 +2387,7 @@ int main(void) {
         }
         
         execute_command_line(trimmed);
-        
+        add_to_history(trimmed);
         if (!strstr(trimmed, "&&")) {
             add_to_history(trimmed);
         }
