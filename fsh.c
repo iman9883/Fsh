@@ -2474,7 +2474,7 @@ int main(int argc, char *argv[]) {
     };
 
 
-    while ((opt = getopt_long(argc, argv, "+abefhkmnop:tuUvxC:E:HPT", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+abefhkmnop:tc:tuUvxC:E:HPT", long_options, NULL)) != -1) {
         switch (opt) {
             // Short options
             case 'a': shell_opts.allexport = true; break;
