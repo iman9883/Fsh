@@ -1,5 +1,5 @@
 /*
- * Fsh - The Friendly Shell v3.3.4
+ * Fsh - The Friendly Shell v3.3.5
  * Features: 500+ CMD Translations | Persian UTF-8 | Pipe | &&/& | Enhanced Safety
  */
 
@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <stdbool.h>
+#include <fnmatch.h>
 
 #define FSH_MAX_INPUT 4096
 #define FSH_MAX_ARGS 128
@@ -43,6 +44,8 @@
 #define COLOR_CYAN    "\033[1;36m"
 #define COLOR_WHITE   "\033[1;37m"
 #define COLOR_RESET   "\033[0m"
+#define FSH_MAX_CASE_PATTERNS 20
+#define FSH_MAX_SHOPT_OPTIONS 50
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstringop-truncation"
@@ -88,6 +91,12 @@ typedef struct {
 } CommandChain;
 
 typedef struct {
+    char* pattern[FSH_MAX_CASE_PATTERNS];
+    int pattern_count;
+    char* commands;
+} CaseStatement;
+
+typedef struct {
     bool allexport;        // -a
     bool notify;           // -b
     bool errexit;          // -e
@@ -114,6 +123,10 @@ typedef struct {
     bool norc;             // --norc
     bool noprofile;        // --noprofile
     bool login_shell;      // --login
+    bool histappend;       // shopt -s histappend
+    bool histreedit;       // shopt -s histreedit
+    bool histverify;       // shopt -s histverify
+    bool checkwinsize;     // shopt -s checkwinsize
 } ShellOptions;
 
 static ShellOptions shell_opts = {0};
@@ -150,6 +163,13 @@ static int execute_command_line(char* input);
 static void print_banner(void);
 static void execute_command_line_from_file(const char* filename);
 static void cleanup_and_exit(void);
+static void load_shell_rc_file(void);
+static int builtin_case(char** args);
+static int builtin_shopt(char** args);
+static int builtin_test(char** args);
+static char* expand_command_substitution(const char* input);
+static char* expand_bash_prompt(const char* ps1);
+static int execute_case_statement(const char* value, CaseStatement* cases);
 
 // Built-in implementations
 int builtin_cd(char** args);
@@ -210,27 +230,30 @@ int builtin_type(char** args) {
 }
 
 static char distro_name[64] = "FarazOS";
-static void detect_distro_name(void) {
-    FILE* f = fopen("/etc/os-release", "r");
-    if (!f) return;
-    char line[128];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "NAME=", 12) == 0) { // you can replace with PRETTY_NAME=
-            char* val = line + 12;
-            // Remove leading quote if present
-            if (*val == '\"') val++;
-            // Remove trailing quote and newline if present
-            size_t len = strlen(val);
-            while (len > 0 && (val[len-1] == '\\n' || val[len-1] == '\"')) {
-                val[--len] = '\\0';
-            }
-            strncpy(distro_name, val, sizeof(distro_name)-1);
-            distro_name[sizeof(distro_name)-1] = '\\0';
-            break;
-        }
-    }
-    fclose(f);
-}
+
+
+// you can enable this function if you want auto detect distro name, don't forget to enable from main function
+// static void detect_distro_name(void) { 
+//    FILE* f = fopen("/etc/os-release", "r");
+//    if (!f) return;
+//    char line[128];
+//    while (fgets(line, sizeof(line), f)) {
+//        if (strncmp(line, "NAME=", 5) == 0) { 
+//            char* val = line + 5;
+//            // Remove leading quote if present
+//            if (*val == '\"') val++;
+//            // Remove trailing quote and newline if present
+//            size_t len = strlen(val);
+//            while (len > 0 && (val[len-1] == '\\n' || val[len-1] == '\"')) {
+//                val[--len] = '\\0';
+//            }
+//            strncpy(distro_name, val, sizeof(distro_name)-1);
+//            distro_name[sizeof(distro_name)-1] = '\\0';
+//            break;
+//        }
+//    }
+//    fclose(f);
+//}
 
 // 500+ Windows CMD translations
 static const CmdMapping cmd_mappings[] = {
@@ -1752,6 +1775,292 @@ static void exec_pipe_commands(char*** pipe_args, int pipe_count) {
     stats.pipes_executed++;
 }
 
+// NEW: Test parser for [[ ]] and [ ]
+static int parse_and_execute_test(const char* expression) {
+    // Handle [[ expression ]] or [ expression ]
+    char* expr_copy = strdup(expression);
+    char* saveptr;
+    char* token = strtok_r(expr_copy, " ", &saveptr);
+    
+    // Simplified test parsing
+    if (!token) return 1; // false
+    
+    // Handle -z, -n, -f, -d, -e, etc.
+    if (strcmp(token, "-z") == 0) {
+        char* next = strtok_r(NULL, " ", &saveptr);
+        int result = (next && strlen(next) > 0) ? 0 : 1;
+        free(expr_copy);
+        return result;
+    }
+    if (strcmp(token, "-n") == 0) {
+        char* next = strtok_r(NULL, " ", &saveptr);
+        int result = (next && strlen(next) > 0) ? 1 : 0;
+        free(expr_copy);
+        return result;
+    }
+    if (strcmp(token, "-f") == 0) {
+        char* next = strtok_r(NULL, " ", &saveptr);
+        int result = (next && access(next, F_OK) == 0) ? 1 : 0;
+        free(expr_copy);
+        return result;
+    }
+    if (strcmp(token, "-d") == 0) {
+        char* next = strtok_r(NULL, " ", &saveptr);
+        struct stat st;
+        int result = (next && stat(next, &st) == 0 && S_ISDIR(st.st_mode)) ? 1 : 0;
+        free(expr_copy);
+        return result;
+    }
+    
+    // Handle string comparisons
+    char* op = strtok_r(NULL, " ", &saveptr);
+    if (op && saveptr) {
+        char* right = strtok_r(NULL, " ", &saveptr);
+        if (right) {
+            if (strcmp(op, "=") == 0) {
+                int result = strcmp(token, right) == 0;
+                free(expr_copy);
+                return result;
+            }
+            if (strcmp(op, "!=") == 0) {
+                int result = strcmp(token, right) != 0;
+                free(expr_copy);
+                return result;
+            }
+        }
+    }
+    
+    free(expr_copy);
+    return 0;
+}
+
+// NEW: Command substitution $(...)
+static char* expand_command_substitution(const char* input) {
+    static char output[FSH_MAX_INPUT];
+    char* out_ptr = output;
+    const char* in_ptr = input;
+    
+    while (*in_ptr && out_ptr - output < FSH_MAX_INPUT - 1) {
+        if (*in_ptr == '$' && *(in_ptr + 1) == '(') {
+            // Found $(command)
+            in_ptr += 2;
+            char cmd[FSH_MAX_INPUT];
+            int depth = 1;
+            char* cmd_ptr = cmd;
+            
+            while (*in_ptr && cmd_ptr - cmd < FSH_MAX_INPUT - 1 && depth > 0) {
+                if (*in_ptr == '(') depth++;
+                else if (*in_ptr == ')') depth--;
+                if (depth > 0) *cmd_ptr++ = *in_ptr;
+                in_ptr++;
+            }
+            *cmd_ptr = '\0';
+            
+            // Execute command and capture output
+            FILE* fp = popen(cmd, "r");
+            if (fp) {
+                char result[FSH_MAX_INPUT];
+                if (fgets(result, sizeof(result), fp)) {
+                    result[strcspn(result, "\n")] = 0; // Remove newline
+                    strcpy(out_ptr, result);
+                    out_ptr += strlen(result);
+                }
+                pclose(fp);
+            }
+        } else {
+            *out_ptr++ = *in_ptr++;
+        }
+    }
+    *out_ptr = '\0';
+    return output;
+}
+
+// Variable assignment support (VAR=VAL, PS1=..., etc)
+static int handle_variable_assignment(const char* line) {
+    const char* eq = strchr(line, '=');
+    if (!eq || eq == line) return 0;
+    // Only allow if before first space
+    for (const char* p = line; p < eq; ++p) {
+        if (*p == ' ' || *p == '\t') return 0;
+    }
+    char var[256], val[FSH_MAX_INPUT];
+    size_t varlen = eq - line;
+    if (varlen >= sizeof(var)) return 0;
+    strncpy(var, line, varlen);
+    var[varlen] = '\0';
+    strncpy(val, eq + 1, sizeof(val) - 1);
+    val[sizeof(val) - 1] = '\0';
+    setenv(var, val, 1);
+    return 1;
+}
+
+// NEW: Bash PS1 prompt expansion
+static char* expand_bash_prompt(const char* ps1) {
+    static char prompt[FSH_MAX_INPUT];
+    char* out = prompt;
+    const char* in = ps1;
+    
+    while (*in && out - prompt < FSH_MAX_INPUT - 1) {
+        if (*in == '\\' && *(in + 1)) {
+            in++;
+            switch (*in) {
+                case 'u': strcpy(out, getenv("USER") ?: "user"); out += strlen(out); break;
+                case 'h': 
+                    gethostname(out, FSH_MAX_INPUT - (out - prompt)); 
+                    char* dot = strchr(out, '.');
+                    if (dot) *dot = '\0';
+                    out += strlen(out);
+                    break;
+                case 'w': {
+                    char cwd[PATH_MAX];
+                    if (getcwd(cwd, sizeof(cwd))) {
+                        const char* home = getenv("HOME");
+                        if (home && strncmp(cwd, home, strlen(home)) == 0) {
+                            sprintf(out, "~%s", cwd + strlen(home));
+                        } else {
+                            strcpy(out, cwd);
+                        }
+                        out += strlen(out);
+                    }
+                    break;
+                }
+                case 'W': {
+                    char cwd[PATH_MAX];
+                    if (getcwd(cwd, sizeof(cwd))) {
+                        char* basename = strrchr(cwd, '/');
+                        strcpy(out, basename ? basename + 1 : cwd);
+                        out += strlen(out);
+                    }
+                    break;
+                }
+                case '$': *out++ = (geteuid() == 0) ? '#' : '$'; break;
+                case '[': *out++ = '\033'; break; // Start non-printing
+                case ']': *out++ = '\033'; break; // End non-printing
+                default: *out++ = *in; break;
+            }
+            in++;
+        } else if (*in == '$' && *(in + 1) == '{') {
+            // Handle ${var} substitution
+            in += 2;
+            char var[256];
+            char* var_ptr = var;
+            while (*in && *in != '}' && var_ptr - var < 255) {
+                *var_ptr++ = *in++;
+            }
+            *var_ptr = '\0';
+            if (*in == '}') in++;
+            
+            const char* value = getenv(var);
+            if (value) {
+                strcpy(out, value);
+                out += strlen(value);
+            }
+        } else {
+            *out++ = *in++;
+        }
+    }
+    *out = '\0';
+    return prompt;
+}
+
+// NEW: Built-in case implementation
+static int builtin_case(char** args) {
+    // Usage: case value in pattern) commands ;; esac
+    if (!args[1] || strcmp(args[1], "in") != 0) {
+        fprintf(stderr, "case: invalid syntax\n");
+        return 1;
+    }
+    
+    char* value = args[0] + 5; // Skip "case" and space
+    value[strlen(value) - 3] = '\0'; // Remove " in"
+    
+    // Simple implementation - just execute the first matching pattern
+    int found = 0;
+    for (int i = 2; args[i]; i++) {
+        if (strcmp(args[i], "esac") == 0) break;
+        
+        // Check if this is a pattern
+        if (strstr(args[i], ")")) {
+            char* pattern = strtok(args[i], ")");
+            if (fnmatch(pattern, value, 0) == 0) {
+                found = 1;
+                // Execute commands after ) until ;;
+                while (args[++i] && strcmp(args[i], ";;") != 0) {
+                    // Execute each command
+                    execute_command_line(args[i]);
+                }
+                break;
+            }
+        }
+    }
+    
+    return found ? 0 : 1;
+}
+
+// NEW: Built-in shopt implementation
+static int builtin_shopt(char** args) {
+    if (!args[1]) {
+        printf("shopt: no option specified\n");
+        return 1;
+    }
+    
+    const char* option = args[1];
+    bool current_value = false;
+    
+    // Map shopt options to shell_opts
+    if (strcmp(option, "histappend") == 0) current_value = shell_opts.histappend;
+    else if (strcmp(option, "histreedit") == 0) current_value = shell_opts.histreedit;
+    else if (strcmp(option, "histverify") == 0) current_value = shell_opts.histverify;
+    else if (strcmp(option, "checkwinsize") == 0) current_value = shell_opts.checkwinsize;
+    else {
+        printf("shopt: unknown option '%s'\n", option);
+        return 1;
+    }
+    
+    // Handle -s (set) or -u (unset)
+    if (args[0][0] == '-' && args[0][1] == 's') {
+        current_value = true;
+    } else if (args[0][0] == '-' && args[0][1] == 'u') {
+        current_value = false;
+    }
+    
+    // Set the option
+    if (strcmp(option, "histappend") == 0) shell_opts.histappend = current_value;
+    else if (strcmp(option, "histreedit") == 0) shell_opts.histreedit = current_value;
+    else if (strcmp(option, "histverify") == 0) shell_opts.histverify = current_value;
+    else if (strcmp(option, "checkwinsize") == 0) shell_opts.checkwinsize = current_value;
+    
+    return 0;
+}
+
+// NEW: Built-in [ ] and [[ ]] test
+static int builtin_test(char** args) {
+    // Skip [ or [[
+    int i = 0;
+    if (strcmp(args[0], "[") == 0 || strcmp(args[0], "[[") == 0) i = 1;
+    
+    // Build the expression
+    char expr[FSH_MAX_INPUT] = "";
+    for (; args[i] && strcmp(args[i], "]") != 0 && strcmp(args[i], "]]") != 0; i++) {
+        if (i > 0) strcat(expr, " ");
+        strcat(expr, args[i]);
+    }
+    
+    return parse_and_execute_test(expr) ? 0 : 1;
+}
+
+// ADD TO find_builtin() in the builtins array:
+static const BuiltinCommand builtins[] = {
+    // ... existing builtins ...
+    {"case", builtin_case},
+    {"shopt", builtin_shopt},
+    {"[", builtin_test},
+    {"[[", builtin_test},
+    {NULL, NULL}
+};
+
+// MODIFY main() - Add PS1 expansion
+
 // Keyboard input with UTF-8
 static char* read_input_with_history(void) {
     static char buffer[FSH_MAX_INPUT];
@@ -1913,6 +2222,38 @@ static void execute_single_command(char* cmd_line) {
     }
 }
 
+static void load_shell_rc_file(void) {
+    if (shell_opts.norc || !shell_opts.interactive) {
+        return; // Don't load rc files if --norc or non-interactive
+    }
+    
+    char rc_path[PATH_MAX];
+    const char* home = getenv("HOME");
+    
+    if (!home) {
+        fprintf(stderr, COLOR_YELLOW "Warning: HOME not set, skipping rc file\n" COLOR_RESET);
+        return;
+    }
+    
+    // Try .fshrc first (primary)
+    snprintf(rc_path, sizeof(rc_path), "%s/.fshrc", home);
+    if (access(rc_path, R_OK) == 0) {
+        if (shell_opts.verbose || shell_opts.xtrace) {
+            printf("+ loading %s\n", rc_path);
+        }
+        execute_command_line_from_file(rc_path);
+        return;
+    }
+    
+    // Optional: look for .fshrc in current directory
+    if (access(".fshrc", R_OK) == 0) {
+        if (shell_opts.verbose || shell_opts.xtrace) {
+            printf("+ loading ./.fshrc\n");
+        }
+        execute_command_line_from_file(".fshrc");
+    }
+}
+
 // Execute piped commands wrapper
 static void execute_piped_commands(char* cmd_line) {
     char* pipe_cmds[FSH_MAX_PIPE_CMDS];
@@ -1973,7 +2314,45 @@ static int execute_command_line(char* input) {
         }
         return last_exit_status;
     }
-    
+        // Ignore common shell keywords and grouping tokens
+    // Ignore common shell keywords and grouping tokens
+    if (
+        strcmp(trimmed, "{") == 0 || strcmp(trimmed, "}") == 0 ||
+        strcmp(trimmed, "(") == 0 || strcmp(trimmed, ")") == 0 ||
+        strcmp(trimmed, ".") == 0 || strcmp(trimmed, "fi") == 0 ||
+        strcmp(trimmed, "esac") == 0 || strcmp(trimmed, "then") == 0 ||
+        strcmp(trimmed, "do") == 0 || strcmp(trimmed, "done") == 0 ||
+        strcmp(trimmed, "elif") == 0 || strcmp(trimmed, "else") == 0 ||
+        strcmp(trimmed, ";;") == 0 ||
+        strcmp(trimmed, "*)") == 0 ||
+        (trimmed[0] == '*' && trimmed[1] == ')' && trimmed[2] == 0) ||
+        (strlen(trimmed) > 1 && trimmed[strlen(trimmed)-1] == ')' &&
+            (trimmed[0] == '*' || trimmed[0] == ')'))
+    ) {
+        return 0;
+    }
+    if (handle_variable_assignment(trimmed)) return 0;
+
+    // Built-in: case ... in ... esac (stub)
+    if (strncmp(trimmed, "case ", 5) == 0) {
+        printf("[case/esac not fully supported yet]\n");
+        return 0;
+    }
+    // Built-in: if ...; then ...; fi (stub)
+    if (strncmp(trimmed, "if ", 3) == 0) {
+        printf("[if/then/fi not fully supported yet]\n");
+        return 0;
+    }
+    // Built-in: shopt stub
+    if (strncmp(trimmed, "shopt", 5) == 0) {
+        printf("[shopt stub: no effect]\n");
+        return 0;
+    }
+    // Built-in: eval stub
+    if (strncmp(trimmed, "eval", 4) == 0) {
+        printf("[eval stub: no effect]\n");
+        return 0;
+    }
     char* amp_pos = strrchr(trimmed, '&');
     int background = 0;
     if (amp_pos && amp_pos[1] == '\0') {
@@ -2092,7 +2471,7 @@ static void cleanup_and_exit(void) {
 }
 
 static void print_help(const char* program_name) {
-    printf("Fsh - The Friendly Shell v3.3.4\n\n");
+    printf("Fsh - The Friendly Shell v3.3.5\n\n");
     printf("Usage: %s [options] [file]\n", program_name);
     printf("\nOptions:\n");
     printf("  -c COMMAND    Execute COMMAND and exit\n");
@@ -2155,7 +2534,7 @@ static void init_restricted_mode(void) {
 }
 
 static void print_version(void) {
-    printf("Fsh - The Friendly Shell v3.3.4\n");
+    printf("Fsh - The Friendly Shell v3.3.5\n");
     printf("Copyright (C) 2026 FarazOS Project\n");
 }
 
@@ -2163,7 +2542,7 @@ static void print_version(void) {
 static void print_banner(void) {
     printf("\n╔══════════════════════════════════════════════════════════════════════════════╗\n");
     printf("║                                                                              ║\n");
-    printf("║   %sFsh - The Friendly Shell v3.3.4%s                                      ║\n", COLOR_MAGENTA, COLOR_RESET);
+    printf("║   %sFsh - The Friendly Shell v3.3.5%s                                      ║\n", COLOR_MAGENTA, COLOR_RESET);
     printf("║   %s500+ CMD | Persian UTF-8 | Pipe | &&/& | Enhanced Safety%s           ║\n", COLOR_CYAN, COLOR_RESET);
     printf("║                                                                              ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════════╝\n\n");
@@ -2443,7 +2822,7 @@ int main(int argc, char *argv[]) {
     init_command_database();
     signal(SIGCHLD, sigchld_handler);
     signal(SIGINT, SIG_IGN);
-    detect_distro_name();
+    // detect_distro_name(); // here is, thats function auto detect your distro name
     shell_opts.interactive = isatty(STDIN_FILENO);
     
     int opt;
@@ -2519,7 +2898,7 @@ int main(int argc, char *argv[]) {
         }
     }
     init_restricted_mode();
-
+    load_shell_rc_file();
     if (init_file && !shell_opts.noprofile) {
         if (access(init_file, R_OK) == 0) {
             execute_command_line_from_file(init_file); // Would need implementation
@@ -2576,8 +2955,15 @@ int main(int argc, char *argv[]) {
             snprintf(temp, sizeof(temp), "~%s", cwd + strlen(home));
             strcpy(cwd, temp);
         }
-        
-        printf("%s[%s@%s %s]$%s ", COLOR_GREEN, user, distro_name, cwd, COLOR_RESET);
+
+        // EXPANDED PROMPT with bash PS1 support
+        const char* ps1 = getenv("PS1");
+        if (ps1) {
+            char* expanded = expand_bash_prompt(ps1);
+            printf("%s", expanded);
+        } else {
+            printf("%s[%s@%s %s]$%s ", COLOR_GREEN, user, distro_name, cwd, COLOR_RESET);
+        }
         fflush(stdout);
         
         char* input_line = read_input_with_history();
@@ -2608,7 +2994,23 @@ int main(int argc, char *argv[]) {
             add_to_history(trimmed);
         }
         reset_history_position();
+        if (last_exit_status == 127) {
+            printf("%s[Command not found. Launching bash to process .bashrc and re-run shell...]%s\n", COLOR_YELLOW, COLOR_RESET);
+            char exe_path[PATH_MAX];
+            ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path)-1);
+            if (len > 0) {
+                exe_path[len] = '\0';
+                execlp("bash", "bash", "-i", "-c", exe_path, NULL);
+                perror("exec bash");
+                exit(127);
+            } else {
+                execlp("bash", "bash", "-i", NULL);
+                perror("exec bash");
+                exit(127);
+            }
+        }
     }
+
     
     printf("\n%sGoodbye! Session time: %ld seconds%s\n", 
            COLOR_GREEN, (long)(time(NULL) - stats.start_time), COLOR_RESET);
