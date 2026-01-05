@@ -2994,21 +2994,8 @@ int main(int argc, char *argv[]) {
             add_to_history(trimmed);
         }
         reset_history_position();
-        if (last_exit_status == 127) {
-            printf("%s[Command not found. Launching bash to process .bashrc and re-run shell...]%s\n", COLOR_YELLOW, COLOR_RESET);
-            char exe_path[PATH_MAX];
-            ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path)-1);
-            if (len > 0) {
-                exe_path[len] = '\0';
-                execlp("bash", "bash", "-i", "-c", exe_path, NULL);
-                perror("exec bash");
-                exit(127);
-            } else {
-                execlp("bash", "bash", "-i", NULL);
-                perror("exec bash");
-                exit(127);
-            }
-        }
+        
+        
     }
 
     
