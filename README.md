@@ -1,28 +1,65 @@
-***** Fsh *****
+# Fsh
 
+**The Friendly Shell**
 
-The Friendly Shell
+Fsh is the default command-line shell developed for FarazOS.
 
-Used in FarazOS 
-its a default shell for users in FarazOS
+It is designed to be lightweight, user-friendly, and compatible with users coming from different operating systems. Fsh focuses on simplicity while providing useful features that improve the command-line experience.
 
+## Features
 
+* Automatic correction of common command mistakes.
+* Translation of many Windows/MS-DOS commands into their Linux equivalents.
+* Persian keyboard layout detection and command conversion.
+* Lightweight design with minimal resource usage.
+* Seamless integration with the FarazOS ecosystem.
 
-~~~
+One of Fsh's most useful features is its ability to recognize commands entered while the keyboard is accidentally set to Persian. Instead of displaying an error, Fsh attempts to convert the text into a valid command and execute it.
 
-gcc -o fsh1 fsh.c -std=c99 
+Fsh also provides compatibility for users migrating from Windows by automatically translating many familiar Windows commands into their Linux counterparts.
 
-~~~
+## Building
 
+```bash
+gcc -o fsh fsh.c -std=c99
+```
 
-Fsh can translate some Windows/msdos commands to linux command
-and can auto correct some commands
+## Command Compatibility
 
-And if you weren't careful and the keyboard language was in Persian, Fsh can convert it into a readable command that can be executed by the system.
+Fsh includes an extensive command translation layer that maps hundreds of common Windows/MS-DOS commands to Linux equivalents.
 
+Examples:
 
+| Windows Command | Linux Equivalent      |
+| --------------- | --------------------- |
+| `dir`           | `ls -lh --color=auto` |
+| `copy`          | `cp -i`               |
+| `del`           | `rm -i`               |
+| `move`          | `mv -i`               |
+| `type`          | `cat`                 |
+| `cls`           | `clear`               |
+| `mkdir`         | `mkdir -p`            |
+| `tasklist`      | `ps aux`              |
+| `ipconfig`      | `ip a`                |
 
-And this is a list of Windows commands that Fsh can convert to Linux commands.
+The complete translation table can be found below in this document.
+
+---
+
+### About FarazOS
+
+Fsh is part of the FarazOS project, a lightweight Linux distribution focused on performance and independence.
+
+FarazOS aims to provide its own ecosystem of core components, including:
+
+* Custom Init System
+* Custom Shell (Fsh)
+* Custom Desktop Environment
+* Custom Display Manager
+* Custom Package Management Tools
+
+The goal is to create a fast and efficient operating system that performs well on low-end hardware, extends the life of older computers, and helps users avoid unnecessary hardware upgrades during periods of rising hardware costs.
+
 
 
 ~~~
